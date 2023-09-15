@@ -18,6 +18,7 @@
 #include "mlir/Dialect/Bufferization/Transforms/FuncBufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/Bufferization/Transforms/OneShotAnalysis.h"
 #include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Transforms/BufferizableOpInterfaceImpl.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/Transforms/BufferizableOpInterfaceImpl.h"
@@ -360,9 +361,15 @@ struct LinalgExtOpInterface
     // TODO: Implement payloadUsesValueFromOperand for individual ops. There
     // are a limited number of LinalgExt ops, so we hardcode them here. We don't
     // expect to add more LinalgExt ops.
-    auto linalgExtOp = cast<IREE::LinalgExt::LinalgExtOp>(op);
-    if (linalgExtOp.isInputTensor(&opOperand))
-      return true;
+    if (auto linalgExtOp = dyn_cast<IREE::LinalgExt::LinalgExtOp>(op)) {
+      if (linalgExtOp.isInputTensor(&opOperand))
+        return true;
+    } else if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+      // This has been made generic for all LinalgOps but currently SoftmaxOp
+      // should get targeted because of this check.
+      if (linalgOp.isInputTensor(&OpOperand))
+        return true;
+    }
     return !isa<IREE::LinalgExt::ScatterOp, IREE::LinalgExt::ReverseOp>(op);
   }
 
@@ -378,15 +385,20 @@ struct LinalgExtOpInterface
   bufferization::AliasingOpOperandList
   getAliasingOpOperands(Operation *op, Value value,
                         const AnalysisState &state) const {
-    auto linalgExtOp = cast<IREE::LinalgExt::LinalgExtOp>(op);
-
     size_t resultNum = std::distance(op->getOpResults().begin(),
                                      llvm::find(op->getOpResults(), value));
     // The i-th OpResult may alias with the i-th "out" tensor.
-    return {
-        AliasingOpOperand(linalgExtOp.getOutputOperand(resultNum) /*result*/,
-                          BufferRelation::Equivalent,
-                          /*isDefinite=*/false)};
+    if (auto linalgExtOp = dyn_cast<IREE::LinalgExt::LinalgExtOp>(op)) {
+      return {
+          AliasingOpOperand(linalgExtOp.getOutputOperand(resultNum) /*result*/,
+                            BufferRelation::Equivalent,
+                            /*isDefinite=*/false)};
+    } else if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+      return {
+          AliasingOpOperand(linalgOp.getOutputOperand(resultNum) /*result*/,
+                            BufferRelation::Equivalent,
+                            /*isDefinite=*/false)};
+    }
   }
 
   bufferization::AliasingValueList
@@ -411,8 +423,11 @@ struct LinalgExtOpInterface
 
   LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
                           const BufferizationOptions &options) const {
-    return bufferizeLinalgExtOp(
-        rewriter, cast<IREE::LinalgExt::LinalgExtOp>(op), options);
+    if (auto linalgExtOp = dyn_cast<IREE::LinalgExt::LinalgExtOp>(op)) {
+      return bufferizeLinalgExtOp(rewriter, linalgExtOp, options);
+    } else if (auto linalgOp = dyn_cast<linalg::LinalgOp>(op)) {
+      return bufferizeLinalgExtOp(rewriter, linalgOp, options);
+    }
   }
 };
 
@@ -661,8 +676,8 @@ void registerBufferizationInterfaces(DialectRegistry &registry) {
         LinalgExtOpInterface<IREE::LinalgExt::WinogradInputTransformOp>>(*ctx);
     IREE::LinalgExt::WinogradOutputTransformOp::attachInterface<
         LinalgExtOpInterface<IREE::LinalgExt::WinogradOutputTransformOp>>(*ctx);
-    IREE::LinalgExt::SoftmaxOp::attachInterface<
-        LinalgExtOpInterface<IREE::LinalgExt::SoftmaxOp>>(*ctx);
+    linalg::SoftmaxOp::attachInterface<
+        LinalgExtOpInterface<linalg::SoftmaxOp>>(*ctx);
     IREE::LinalgExt::AttentionOp::attachInterface<
         LinalgExtOpInterface<IREE::LinalgExt::AttentionOp>>(*ctx);
   });

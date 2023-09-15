@@ -414,7 +414,7 @@ struct RaiseSpecialOpsPass : public RaiseSpecialOpsBase<RaiseSpecialOpsPass> {
       linalg::LinalgOp op = softmax.first;
       Value src = softmax.second;
       rewriter.setInsertionPoint(softmax.first);
-      rewriter.replaceOpWithNewOp<IREE::LinalgExt::SoftmaxOp>(
+      rewriter.replaceOpWithNewOp<linalg::SoftmaxOp>(
           op, src, op.getDpsInitOperand(0)->get(), op.getNumLoops() - 1);
     }
 

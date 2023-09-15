@@ -11,11 +11,18 @@
 #include "iree-dialects/Dialect/LinalgExt/Utils/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/TransformOps/LinalgTransformOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Tensor/Utils/Utils.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/Pass/Pass.h"
+
+#include "mlir/Dialect/Async/IR/Async.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/OpImplementation.h"
+
+#include "mlir/Dialect/Transform/IR/TransformTypes.h"
 
 namespace mlir {
 namespace iree_compiler {
@@ -118,43 +125,35 @@ static Value computeSoftmax(Value numerator, Value denominator, Value output,
 ///
 LogicalResult convertSoftmaxToGenerics(func::FuncOp funcOp) {
   IRRewriter rewriter(funcOp.getContext());
+  // mlir::transform::ErrorCheckingTrackingListener trackingListener(*this, funcOp);
+  // mlir::transform::TransformRewriter transformRewriter(funcOp.getContext(),
+  //                                       &trackingListener);
   SmallVector<Operation *> toDelete;
-  funcOp.walk([&](IREE::LinalgExt::SoftmaxOp softmaxOp) {
+  funcOp.walk([&](linalg::SoftmaxOp softmaxOp) {
+    // Will be used for fusion later.
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(softmaxOp);
-    Location loc = softmaxOp.getLoc();
-    Value input = softmaxOp.input();
-    ShapedType inputType = input.getType().cast<ShapedType>();
-    Type elementType = inputType.getElementType();
-    int64_t reductionDim = softmaxOp.getDimension();
-    SmallVector<OpFoldResult> dims =
-        tensor::getMixedSizes(rewriter, loc, input);
-    Value outputNd = rewriter.create<tensor::EmptyOp>(loc, dims, elementType);
-    dims.erase(dims.begin() + reductionDim);
-    // Compute max along dim
-    Value output = rewriter.create<tensor::EmptyOp>(loc, dims, elementType);
-    Value largeNegative = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getFloatAttr(elementType, -1.0e30));
-    Value negativeInit =
-        rewriter.create<linalg::FillOp>(loc, Value{largeNegative}, output)
-            .result();
-    Value max =
-        reduce<arith::MaxFOp>(input, negativeInit, reductionDim, loc, rewriter);
-    // Subtract max from input and exponentiate
-    linalg::GenericOp numeratorOp =
-        subtractAndExp(input, max, outputNd, reductionDim, loc, rewriter);
-    Value numerator = numeratorOp->getResult(0);
-    // Compute sum along dim
-    Value zero = rewriter.create<arith::ConstantOp>(
-        loc, rewriter.getZeroAttr(elementType));
-    Value zeroInit =
-        rewriter.create<linalg::FillOp>(loc, Value{zero}, output).result();
-    Value denominator =
-        reduce<arith::AddFOp>(numerator, zeroInit, reductionDim, loc, rewriter);
-    // Compute softmax
-    Value result = computeSoftmax(numerator, denominator, outputNd,
-                                  reductionDim, loc, rewriter);
-    softmaxOp.getResult()[0].replaceAllUsesWith(result);
+    
+    // DiagnosedSilenceableFailure transform::DecomposeInterfaceOp::applyToOne(
+    // transform::TransformRewriter &rewriter, Operation *target,
+    // transform::ApplyToEachResultList &results,
+    // transform::TransformState &state)
+
+    mlir::transform::ApplyToEachResultList results;
+    mlir::transform::TransformState state(NULL, NULL, NULL, NULL);
+    mlir::DiagnosedSilenceableFailure result =
+        mlir::transform::DecomposeInterfaceOp::applyToOne(
+          transformRewriter, softmaxOp, results, state);
+
+    if (!result.succeeded())
+      // TODO:Error out!
+      // return signalPassFailure();
+      return WalkResult::advance();
+
+    Operation* resultOp = results[0].dyn_cast<Operation*>();
+    Value numerator = resultOp->getOperand(0);
+    Operation* numeratorOp = numerator.getDefiningOp();
+
     // Delete the op after the walk.
     toDelete.push_back(softmaxOp.getOperation());
 
