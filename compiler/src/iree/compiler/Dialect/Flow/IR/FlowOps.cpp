@@ -118,6 +118,10 @@ getDroppedDimsImpl(RankedTensorType slicedObjectType,
     // If the size is not 1, or if the current matched dimension of the result
     // is the same static shape as the size value (which is 1), then the
     // dimension is preserved.
+    if (auto sizeValCast = dyn_cast<Value>(size.value())) {
+      shapePos++;
+      continue;
+    }
     if (!sizeVal || sizeVal.value() != 1 ||
         (shapePos < resultShape.size() && resultShape[shapePos] == 1)) {
       shapePos++;

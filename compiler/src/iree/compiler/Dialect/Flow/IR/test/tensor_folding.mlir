@@ -695,3 +695,26 @@ func.func @foldSplatReshapeIntoSplatDynamic(%arg0 : f32, %arg1 : index, %arg2 : 
   %1 = flow.tensor.reshape %0 : tensor<?x4xf32>{%arg1} -> tensor<?x?xf32>{%arg2, %arg3}
   return %1 : tensor<?x?xf32>
 }
+
+// -----
+
+#map = affine_map<(d0) -> (d0 * -8 + 257, 8)>
+#map1 = affine_map<(d0) -> (d0 * 8)>
+module {
+  func.func @castLoad(%arg0: index, %arg1: index, %arg2: index) -> tensor<16x?x1xf16> {
+    %c1 = arith.constant 1 : index
+    %c16 = arith.constant 16 : index
+    %0 = hal.interface.binding.subspan set(0) binding(0) type(storage_buffer) alignment(64) offset(%arg2) flags(ReadOnly) : !flow.dispatch.tensor<readonly:tensor<3x1x16x257x88xf16>>
+    %1 = affine.min #map(%arg1)
+    %2 = affine.apply #map1(%arg1)
+    %3 = flow.dispatch.tensor.load %0, offsets = [1, 0, %arg0, %2, %arg1], sizes = [1, 1, %c16, %1, %c1], strides = [1, 1, 1, 1, 1] : !flow.dispatch.tensor<readonly:tensor<3x1x16x257x88xf16>> -> tensor<?x?x?xf16>
+    %cast = tensor.cast %3 : tensor<?x?x?xf16> to tensor<16x?x1xf16>
+    return %cast : tensor<16x?x1xf16>
+  }
+}
+// CHECK-LABEL: @castLoad
+// CHECK-NEXT:    %[[INPUT:.*]] = hal.interface.binding.subspan
+// CHECK-NEXT:    %{{.*}} = affine.min #map()
+// CHECK-NEXT:    %{{.*}} = affine.apply #map1()
+// CHECK-NEXT:    %[[OUTPUT:.*]] = flow.dispatch.tensor.load %[[INPUT]], offsets = [1, 0, %{{.*}}, %{{.*}}, %{{.*}}], sizes = [1, 1, 16, %{{.*}}, 1], strides = [1, 1, 1, 1, 1]
+// CHECK-NEXT:    return %[[OUTPUT]] : tensor<16x?x1xf16>
