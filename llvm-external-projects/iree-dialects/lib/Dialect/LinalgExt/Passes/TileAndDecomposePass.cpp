@@ -247,12 +247,12 @@ LogicalResult reifyLinalgExtTransform(func::FuncOp funcOp, bool onlyTile,
         resultOfTransformations = failure();
       return WalkResult::advance();
     });
-    funcOp.walk([&](WinogradOutputTransformOp outputOp) {
-      if (failed(tileAndDecomposeWinogradOutputTransformOp(outputOp, rewriter,
-                                                           onlyTile)))
-        resultOfTransformations = failure();
-      return WalkResult::advance();
-    });
+    // funcOp.walk([&](WinogradOutputTransformOp outputOp) {
+    //   if (failed(tileAndDecomposeWinogradOutputTransformOp(outputOp, rewriter,
+    //                                                        onlyTile)))
+    //     resultOfTransformations = failure();
+    //   return WalkResult::advance();
+    // });
   }
   return resultOfTransformations;
 }

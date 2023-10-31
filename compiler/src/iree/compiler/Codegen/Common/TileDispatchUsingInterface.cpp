@@ -152,7 +152,9 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
     }
 
     auto method = distributionMethod[index];
+    llvm::outs()<<"For index"<<index<<" : ";
     if (method != linalg::DistributionMethod::None) {
+      llvm::outs()<<"None distribution\n";
       Value numWorkgroups = getValueOrCreateConstantIndexOp(
           builder, loc,
           affine::makeComposedFoldedAffineApply(
@@ -168,6 +170,7 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
     }
 
     if (method == linalg::DistributionMethod::CyclicNumProcsEqNumIters) {
+      llvm::outs()<<"CyclicNumProcsEqNumIters distribution\n";
       offsets[index] = getAsOpFoldResult(lb);
       sizes[index] = createBoundedTileSize(lb, tileSizeVals[index], ub);
       continue;
@@ -180,6 +183,7 @@ static SmallVector<scf::ForOp> generateTileLoopNest(
           sizes[index] = createBoundedTileSize(iv, tileSizeVals[index], ub);
           builder.create<scf::YieldOp>(loc);
         });
+    llvm::outs()<<"Normal distribution\n";
     offsets[index] = loop.getInductionVar();
     loops.push_back(loop);
     builder.setInsertionPoint(loop.getBody()->getTerminator());
@@ -280,6 +284,7 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
                           linalg::LinalgTilingOptions options) {
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPointAfter(op);
+  llvm::outs()<<"Entered here : "<<op<<"\n";
 
   if (!options.tileSizeComputationFunction) {
     return rewriter.notifyMatchFailure(
@@ -305,18 +310,27 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
   // dimensions.
   SmallVector<Value> tileSizeVector =
       options.tileSizeComputationFunction(rewriter, op);
+  llvm::outs()<<"tileSizeVector :-\n";
+  for (auto x : tileSizeVector)
+    llvm::outs()<<x<<"\n";
+  llvm::outs()<<"numLoops "<<numLoops<<"\n";
   if (tileSizeVector.size() < numLoops) {
-    auto zero = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
-    tileSizeVector.append(numLoops - tileSizeVector.size(), zero);
+    // auto zero = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
+    // tileSizeVector.append(numLoops - tileSizeVector.size(), zero);
+    auto two = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 2);
+    auto thirtyTwo = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 32);
+    tileSizeVector.push_back(two);
+    tileSizeVector.push_back(thirtyTwo);
   }
   tileSizeVector.resize(numLoops);
 
   IREETilingResult tilingResult;
   tilingResult.tiledLoops.resize(numLoops, false);
   for (auto [index, tileSize] : llvm::enumerate(tileSizeVector)) {
-    if (!isZero(tileSize)) {
-      tilingResult.tiledLoops.set(index);
-    }
+    // llvm::outs()<<"For Index("<<index<<") : isZero "<<isZero(tileSize)<<"\n";
+    // if (!isZero(tileSize)) {
+    tilingResult.tiledLoops.set(index);
+    // }
   }
 
   if (!tilingResult.tiledLoops.any()) {
@@ -330,8 +344,12 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
     // the tile sizes.
     SmallVector<int64_t> interchangeVector;
     if (!options.interchangeVector.empty()) {
+      llvm::outs()<<"interchange was specified\n";
       interchangeVector = fillInterchangeVector(options.interchangeVector,
                                                 iterationDomain.size());
+      llvm::outs()<<"interchangeVector"<<" :-\n";
+      for (auto x: interchangeVector)
+        llvm::outs()<<x<<"\n";
     }
     if (!interchangeVector.empty()) {
       if (!isPermutationVector(interchangeVector)) {
@@ -340,8 +358,11 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
                 "iteration space");
       }
 
+      llvm::outs()<<"Applying permutation on iterationDomain and tileSize :-\n";
       applyPermutationToVector(iterationDomain, interchangeVector);
       applyPermutationToVector(tileSizeVector, interchangeVector);
+      for (auto x : tileSizeVector)
+        llvm::outs()<<x<<"\n";
     }
 
     // If there is distribution specified, adjust the loop ranges. Note that
@@ -357,8 +378,7 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
       SmallVector<Range> parallelLoopRanges;
       SmallVector<unsigned> partitionedLoopIds;
       for (auto [index, iteratorType] : llvm::enumerate(iteratorTypes)) {
-        if (iteratorType == utils::IteratorType::parallel &&
-            !isZero(tileSizeVector[index])) {
+        if (iteratorType == utils::IteratorType::parallel) {
           parallelLoopRanges.push_back(iterationDomainOfr[index]);
           partitionedLoopIds.push_back(index);
         }
@@ -380,12 +400,21 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
         rewriter, loc, iterationDomain, tileSizeVector, distributionMethods,
         procInfo, offsets, sizes, workgroupCount);
 
+    for (auto x : offsets)
+      llvm::outs()<<"Offset : "<<x<<"\n";
+    for (auto x : sizes)
+      llvm::outs()<<"Size : "<<x<<"\n";
+
     if (!interchangeVector.empty()) {
       auto inversePermutation = invertPermutationVector(interchangeVector);
       applyPermutationToVector(offsets, inversePermutation);
       applyPermutationToVector(sizes, inversePermutation);
     }
 
+
+    llvm::outs()<<"Loop nest is empty? : "<<tilingResult.loops.empty()<<"\n";
+    llvm::outs()<<"Print loop nest :-\n";
+    tilingResult.loops.front().dump();
     LLVM_DEBUG({
       if (!tilingResult.loops.empty()) {
         llvm::errs() << "LoopNest shell :\n";
@@ -395,9 +424,11 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
     });
 
     // 4. Generate the tiled implementation within the inner most loop.
-    if (!tilingResult.loops.empty())
+    if (!tilingResult.loops.empty()) {
+      llvm::outs()<<"Will tile?\n";
       rewriter.setInsertionPoint(
           tilingResult.loops.back().getBody()->getTerminator());
+    }
     FailureOr<TilingResult> tiledImplementation =
         op.getTiledImplementation(rewriter, offsets, sizes);
     if (failed(tiledImplementation)) {
@@ -433,6 +464,7 @@ tileDispatchUsingSCFFopOp(RewriterBase &rewriter, TilingInterface op,
           tilingResult.tiledValues, body))) {
     return failure();
   }
+  llvm::outs()<<"Done?\n";
   return tilingResult;
 }
 
