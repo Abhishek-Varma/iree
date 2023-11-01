@@ -214,13 +214,13 @@ static LogicalResult decomposeTiledWinogradOutputTransformOp(
 /// but the output is either (N, H, W, C) or (N, C, H, W).
 LogicalResult tileAndDecomposeWinogradOutputTransformOp(
     WinogradOutputTransformOp outputOp, RewriterBase &rewriter, bool onlyTile) {
-  WinogradOutputTransformOp tiledWinogradOutputTransformOp;
-  if (failed(tileWinogradOutputTransformOp(outputOp, rewriter,
-                                           tiledWinogradOutputTransformOp))) {
-    return failure();
-  }
-  if (onlyTile)
-    return success();
+  WinogradOutputTransformOp tiledWinogradOutputTransformOp = outputOp;
+  // if (failed(tileWinogradOutputTransformOp(outputOp, rewriter,
+  //                                          tiledWinogradOutputTransformOp))) {
+  //   return failure();
+  // }
+  // if (onlyTile)
+  //   return success();
   return decomposeTiledWinogradOutputTransformOp(tiledWinogradOutputTransformOp,
                                                  rewriter);
 }

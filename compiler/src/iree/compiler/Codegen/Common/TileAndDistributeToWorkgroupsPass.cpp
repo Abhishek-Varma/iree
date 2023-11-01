@@ -42,6 +42,9 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
+#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtOps.h"
+#include "iree-dialects/Dialect/LinalgExt/IR/LinalgExtDialect.h"
+
 #define DEBUG_TYPE "iree-codegen-tile-and-distribute-to-workgroups"
 
 namespace mlir {
@@ -345,6 +348,21 @@ void TileAndDistributeToWorkgroupsPass::runOnOperation() {
             "dispatch");
         return signalPassFailure();
       }
+      continue;
+    }
+
+    if (isa<IREE::LinalgExt::WinogradOutputTransformOp>(computeOps.back())) {
+      llvm::outs()<<"Special treatment\n";
+      Operation* specialOp = computeOps.back();
+      auto tilingInterfaceOp = cast<TilingInterface>(specialOp);
+      FailureOr<TilingResult> tiledImplementation =
+          tilingInterfaceOp.getTiledImplementation(rewriter, /*offsets=*/{}, /*sizes=*/{});
+      if (failed(tiledImplementation)) {
+        failed(rewriter.notifyMatchFailure(
+            specialOp, "failed to generate tiled implementation"));
+      }
+      specialOp->getResults()[0].replaceAllUsesWith(
+          (*tiledImplementation).tiledValues[0]);
       continue;
     }
 
