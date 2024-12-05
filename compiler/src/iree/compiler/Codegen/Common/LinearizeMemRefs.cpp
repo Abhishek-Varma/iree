@@ -78,10 +78,36 @@ getLinearizedTypeFromSourceType(MemRefType currentTypeOfSourceMemref) {
 }
 
 static Value reshapeOperand(Location loc, PatternRewriter &rewriter,
-                            Value operand, MemRefType linearizedType) {
+                              Value operand, MemRefType linearizedType, SmallVector<OpFoldResult> sizes = {}) {
+  // return rewriter.create<memref::ReinterpretCastOp>(
+  //     loc, linearizedType, operand, 0, linearizedType.getShape(),
+  //     ArrayRef<int64_t>({1}));
+  int64_t resultOffset;
+  SmallVector<int64_t, 4> resultStrides;
+  LogicalResult retFlag = getStridesAndOffset(linearizedType, resultStrides, resultOffset);
+  assert(succeeded(retFlag) && "could not fetch offset/strides infor from the memref type");
+  OpFoldResult offset = rewriter.create<arith::ConstantIndexOp>(loc, resultOffset).getResult();
+  llvm::outs()<<"Offset = "<<resultOffset<<"\n";
+  llvm::outs()<<"Result strides = "<<resultStrides.size()<<"\n";
+  for (auto x : resultStrides) {
+    llvm::outs()<<"\tstride = "<<x<<"\n";
+  }
+  llvm::outs().flush();
+  SmallVector<Value> stridesVal = llvm::map_to_vector(resultStrides, [&](int64_t stride) {
+    if (stride == ShapedType::kDynamic)
+      return 
+    return rewriter.create<arith::ConstantIndexOp>(loc, stride).getResult();
+  });
+  auto toOpFoldResult = [](Value v) -> OpFoldResult {
+      auto op = v.getDefiningOp<arith::ConstantIndexOp>();
+      if (!op)
+        return v;
+      return op.getValue();
+    };
+
+  // SmallVector<OpFoldResult> strides(sizes.size(), one);
   return rewriter.create<memref::ReinterpretCastOp>(
-      loc, linearizedType, operand, 0, linearizedType.getShape(),
-      ArrayRef<int64_t>({1}));
+      loc, linearizedType, operand, offset, sizes, llvm::map_to_vector(stridesVal, toOpFoldResult));
 }
 
 template <typename OpTy>
@@ -122,8 +148,26 @@ struct LinearizeMemrefAlloc : public OpRewritePattern<OpTy> {
     Value linearizedOp = rewriter.create<OpTy>(
         loc, newTypeOfSourceMemref, dynamicLinearizedSize,
         allocOp.getSymbolOperands(), allocOp.getAlignmentAttr());
+
+    // SmallVector<Value> sizes =
+    //     llvm::map_to_vector(allocOp.getMixedSizes(), [&](OpFoldResult size) {
+    //       Value val;
+    //       if (dyn_cast<Attribute>(size)) {
+    //         val = rewriter.create<arith::ConstantIndexOp>(
+    //             loc, *getConstantIntValue(size));
+    //       } else {
+    //         val = cast<Value>(size);
+    //       }
+    //       return val;
+    //     });
+    
+    llvm::outs()<<"Create an alloc* op= "<<linearizedOp<<"\n";
+    llvm::outs().flush();
     Value delinearizedOp =
-        reshapeOperand(loc, rewriter, linearizedOp, currentTypeOfSourceMemref);
+        reshapeOperand(loc, rewriter, linearizedOp, currentTypeOfSourceMemref, allocOp.getMixedSizes());
+
+    llvm::outs()<<"delinearizedOp = "<<delinearizedOp<<"\n";
+    llvm::outs().flush();
     rewriter.replaceOp(allocOp, delinearizedOp);
     return success();
   }
