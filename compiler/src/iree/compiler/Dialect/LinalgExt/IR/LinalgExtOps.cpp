@@ -588,6 +588,47 @@ void GatherOp::getCanonicalizationPatterns(RewritePatternSet &results,
 }
 
 //===----------------------------------------------------------------------===//
+// MapGatherOp
+//===----------------------------------------------------------------------===//
+
+LogicalResult MapGatherOp::verify() {
+  if (getSourceType().getElementType() != getOutputType().getElementType()) {
+    return emitOpError("expected source and output element types to match");
+  }
+  if (getOutputType().getRank() == 0) {
+    return emitOpError("expected output type to have non-zero rank");
+  }
+  Region &transformRegion = getTransformationRegion();
+  Block &transformBody = transformRegion.getBlocks().front();
+  if (transformBody.getNumArguments() != getOutputRank()) {
+    return emitOpError("expected number of block arguments to be equal "
+                       "to the output rank");
+  }
+  if (!llvm::all_of(transformBody.getArgumentTypes(),
+                    llvm::IsaPred<IndexType>)) {
+    return emitOpError("expected block arguments to be index types");
+  }
+  auto yieldOp = cast<IREE::LinalgExt::YieldOp>(transformBody.getTerminator());
+  if (yieldOp->getNumOperands() != getSourceRank() + 1) {
+    return yieldOp.emitOpError(
+        "expected transformation_region to yield a "
+        "value for each source dimension and a padding value");
+  }
+  for (int operandIdx = 0; operandIdx < getSourceRank(); ++operandIdx) {
+    if (!isa<IndexType>(yieldOp.getOperandTypes()[operandIdx])) {
+      return yieldOp.emitOpError("expected yielded indices to be index types");
+    }
+  }
+  Type paddingType = yieldOp.getOperandTypes()[getSourceRank()];
+  Type elementType = getSourceType().getElementType();
+  if (paddingType != elementType) {
+    return yieldOp.emitOpError("expected yielded padding value type to match "
+                               "source element type");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // MapScatterOp
 //===----------------------------------------------------------------------===//
 
@@ -2840,6 +2881,7 @@ LogicalResult IREE::LinalgExt::IndexOp::verify() {
 DEFINE_OP_GET_EFFECTS(ScatterOp)
 DEFINE_OP_GET_EFFECTS(GatherOp)
 DEFINE_OP_GET_EFFECTS(MapScatterOp)
+DEFINE_OP_GET_EFFECTS(MapGatherOp)
 DEFINE_OP_GET_EFFECTS(SortOp)
 DEFINE_OP_GET_EFFECTS(FftOp)
 DEFINE_OP_GET_EFFECTS(ScanOp)
