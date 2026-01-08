@@ -1732,18 +1732,20 @@ func.func @map_gather_memref(
 //  CHECK-DAG:   %[[OUT_D0:.+]] = memref.dim %[[OUTPUT]], %[[C0]]
 //      CHECK:   scf.for %[[IV:.+]] = %[[C0]] to %[[OUT_D0]] step %[[C1]]
 //      CHECK:     %[[SRC_IDX:.+]]:2 = affine.delinearize_index %[[IV]] into (%[[SRC_D0]], %[[SRC_D1]]) : index, index
-//      CHECK:     %[[BOUND_D0:.+]] = memref.dim %[[SOURCE]], %[[C0]]
-//      CHECK:     %[[GE_ZERO_0:.+]] = arith.cmpi sge, %[[SRC_IDX]]#0, %[[C0]] : index
-//      CHECK:     %[[LT_DIM_0:.+]] = arith.cmpi slt, %[[SRC_IDX]]#0, %[[BOUND_D0]] : index
-//      CHECK:     %[[IN_BOUNDS_0:.+]] = arith.andi %[[GE_ZERO_0]], %[[LT_DIM_0]]
-//      CHECK:     %[[BOUND_D1:.+]] = memref.dim %[[SOURCE]], %[[C1]]
-//      CHECK:     %[[GE_ZERO_1:.+]] = arith.cmpi sge, %[[SRC_IDX]]#1, %[[C0]] : index
-//      CHECK:     %[[LT_DIM_1:.+]] = arith.cmpi slt, %[[SRC_IDX]]#1, %[[BOUND_D1]] : index
-//      CHECK:     %[[IN_BOUNDS_1:.+]] = arith.andi %[[GE_ZERO_1]], %[[LT_DIM_1]]
-//      CHECK:     %[[IN_BOUNDS:.+]] = arith.andi %[[IN_BOUNDS_0]], %[[IN_BOUNDS_1]]
-//      CHECK:     scf.if %[[IN_BOUNDS]] {
+//  CHECK-DAG:     %[[BOUND_D0:.+]] = memref.dim %[[SOURCE]], %[[C0]]
+//  CHECK-DAG:     %[[GE_ZERO_0:.+]] = arith.cmpi sge, %[[SRC_IDX]]#0, %[[C0]] : index
+//  CHECK-DAG:     %[[LT_DIM_0:.+]] = arith.cmpi slt, %[[SRC_IDX]]#0, %[[BOUND_D0]] : index
+//  CHECK-DAG:     %[[IN_BOUNDS_0:.+]] = arith.andi %[[GE_ZERO_0]], %[[LT_DIM_0]]
+//  CHECK-DAG:     %[[BOUND_D1:.+]] = memref.dim %[[SOURCE]], %[[C1]]
+//  CHECK-DAG:     %[[GE_ZERO_1:.+]] = arith.cmpi sge, %[[SRC_IDX]]#1, %[[C0]] : index
+//  CHECK-DAG:     %[[LT_DIM_1:.+]] = arith.cmpi slt, %[[SRC_IDX]]#1, %[[BOUND_D1]] : index
+//  CHECK-DAG:     %[[IN_BOUNDS_1:.+]] = arith.andi %[[GE_ZERO_1]], %[[LT_DIM_1]]
+//  CHECK-DAG:     %[[IN_BOUNDS:.+]] = arith.andi %[[IN_BOUNDS_0]], %[[IN_BOUNDS_1]]
+//      CHECK:     %[[IF_RESULT:.+]] = scf.if %[[IN_BOUNDS]] -> (f32) {
 //      CHECK:       %[[SOURCE_ELEM:.+]] = memref.load %[[SOURCE]]
 // CHECK-SAME:         [%[[SRC_IDX]]#0, %[[SRC_IDX]]#1] : memref<?x?xf32>
-//      CHECK:       memref.store %[[SOURCE_ELEM]], %[[OUTPUT]][%[[IV]]]
+//      CHECK:       scf.yield %[[SOURCE_ELEM]] : f32
 //      CHECK:     } else {
-//      CHECK:       memref.store %[[PAD]], %[[OUTPUT]][%[[IV]]]
+//      CHECK:       scf.yield %[[PAD]] : f32
+//      CHECK:     }
+//      CHECK:     memref.store %[[IF_RESULT]], %[[OUTPUT]][%[[IV]]]

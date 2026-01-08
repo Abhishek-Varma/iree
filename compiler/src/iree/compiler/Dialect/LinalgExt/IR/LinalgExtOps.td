@@ -278,6 +278,7 @@ def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
          "getLoopIteratorTypes",
          "getResultTilePosition",
          "getTiledImplementation",
+         "generateResultTileValue",
          "getIterationDomainTileFromOperandTiles",
          "getTiledImplementationFromOperandTiles",
          "generateScalarImplementation"]>]> {
@@ -323,15 +324,6 @@ def IREELinalgExt_MapGatherOp : IREELinalgExt_Op<"map_gather",
     int64_t getOutputRank() {
       return getOutputType().getRank();
     }
-
-    // Return the source index at the provided position.
-    Value getSourceIndex(int64_t position);
-
-    // Return the output index at the provided position.
-    Value getOutputIndex(int64_t position);
-
-    // Returns the padding value.
-    Value getPaddingValue();
 
     // Helper to apply transformations to the output index block arguments of
     // the transformation body, and replace the uses of the previous output

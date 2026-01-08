@@ -628,26 +628,6 @@ LogicalResult MapGatherOp::verify() {
   return success();
 }
 
-Value MapGatherOp::getSourceIndex(int64_t position) {
-  assert(position < getSourceRank() &&
-         "The source index position being requested should be smaller than the "
-         "source rank.");
-  Block &body = getTransformationRegion().front();
-  auto yield = cast<IREE::LinalgExt::YieldOp>(body.getTerminator());
-  return yield.getOperand(position);
-}
-
-Value MapGatherOp::getOutputIndex(int64_t position) {
-  Block &body = getTransformationRegion().front();
-  return body.getArguments()[position];
-}
-
-Value MapGatherOp::getPaddingValue() {
-  Block &body = getTransformationRegion().front();
-  auto yield = cast<IREE::LinalgExt::YieldOp>(body.getTerminator());
-  return yield.getOperand(yield.getNumOperands() - 1);
-}
-
 void MapGatherOp::insertTransformationAtStart(
     OpBuilder &builder,
     function_ref<SmallVector<Value>(ArrayRef<BlockArgument>)>
@@ -674,10 +654,7 @@ void MapGatherOp::insertTransformationAtStart(
          "previous number of output indices.");
   for (auto [oldIdx, newIdx] :
        llvm::zip_equal(oldOutputIndices, newOutputIndicesTransformed)) {
-    SmallVector<OpOperand *> uses(llvm::make_pointer_range(oldIdx.getUses()));
-    for (OpOperand *use : uses) {
-      use->set(newIdx);
-    }
+    oldIdx.replaceAllUsesWith(newIdx);
   }
   transformBody.eraseArguments(0, oldOutputIndices.size());
 }
