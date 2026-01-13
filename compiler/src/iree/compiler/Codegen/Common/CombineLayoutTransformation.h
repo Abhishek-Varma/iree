@@ -79,6 +79,13 @@ foldPadIntoMapScatter(RewriterBase &rewriter, tensor::PadOp padOp,
                       IREE::LinalgExt::MapScatterOp mapScatterOp,
                       PadDistributionConfigFn padDistributionConfigFn);
 
+/// Fold the `op` into the `mapGatherOp` and return the resulting map_gather,
+/// or failure if the transformation is not supported. The `op` should be a
+/// supported relayout op that produces the source of the map_gather.
+FailureOr<IREE::LinalgExt::MapGatherOp>
+foldIntoMapGather(RewriterBase &rewriter, Operation *op,
+                  IREE::LinalgExt::MapGatherOp mapGatherOp);
+
 /// Combines any layout/indexing transformation ops at the ends of a dispatch.
 /// Finds `iree_codegen.store_to_buffer` ops in the `funcOp`, and combines any
 /// layout transformation ops (like expand_shape, transpose, pack, etc.) that
