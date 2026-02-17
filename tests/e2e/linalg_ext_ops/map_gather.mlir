@@ -52,3 +52,21 @@ func.func @pad_slice_like() {
   check.expect_almost_eq(%result, %expected) : tensor<8xf32>
   return
 }
+
+func.func @broadcast_like() {
+  // Broadcast 2x3 source to 2x3x2x2: each element source[i,j] is replicated along the last two dims.
+  %source = util.unfoldable_constant dense<[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]> : tensor<2x3xf32>
+  %padding = arith.constant 0.0 : f32
+  %output = tensor.empty() : tensor<2x3x2x2xf32>
+  %result = iree_linalg_ext.map_gather %source into %output {
+  ^bb0(%idx0: index, %idx1: index, %idx2: index, %idx3: index):
+    // Output (d0,d1,d2,d3) -> read from source at (d0, d1) (broadcast over d2, d3)
+    iree_linalg_ext.yield %idx0, %idx1, %padding : index, index, f32
+  } : tensor<2x3xf32> into tensor<2x3x2x2xf32> -> tensor<2x3x2x2xf32>
+  %expected = util.unfoldable_constant dense<
+    [ [[[1.0, 1.0], [1.0, 1.0]], [[2.0, 2.0], [2.0, 2.0]], [[3.0, 3.0], [3.0, 3.0]]],
+      [[[4.0, 4.0], [4.0, 4.0]], [[5.0, 5.0], [5.0, 5.0]], [[6.0, 6.0], [6.0, 6.0]]] ]
+  > : tensor<2x3x2x2xf32>
+  check.expect_almost_eq(%result, %expected) : tensor<2x3x2x2xf32>
+  return
+}

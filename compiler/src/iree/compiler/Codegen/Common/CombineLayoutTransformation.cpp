@@ -17,6 +17,7 @@
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -534,10 +535,45 @@ static MapScatterOp insertIdentityMapScatter(RewriterBase &rewriter,
   return mapScatterOp;
 }
 
+/// Returns true if `genericOp` is a pure broadcast/copy: one input, one output,
+/// body yields the input element, and the input indexing map is a projection
+/// (each result is a single dimension from the iteration space).
+static bool isBroadcastGenericOp(linalg::GenericOp genericOp) {
+  if (genericOp.getNumDpsInputs() != 1 || genericOp.getNumDpsInits() != 1) {
+    return false;
+  }
+  Block *body = genericOp.getBody();
+  if (!body || body->getNumArguments() != 2) {
+    return false;
+  }
+  if (body->getTerminator()->getOperands().size() != 1 ||
+      body->getTerminator()->getOperand(0) != body->getArgument(0)) {
+    return false;
+  }
+  if (!llvm::all_of(genericOp.getIteratorTypesArray(),
+                    [](mlir::utils::IteratorType t) {
+                      return linalg::isParallelIterator(t);
+                    })) {
+    return false;
+  }
+  AffineMap inputMap = genericOp.getIndexingMapsArray()[0];
+  // Input map must be a projection: each result is a single dim (no expr).
+  for (AffineExpr expr : inputMap.getResults()) {
+    if (!isa<AffineDimExpr>(expr)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool isSupportedSingleInputRelayoutOp(Operation *op) {
-  return isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp,
-             tensor::ExtractSliceOp, tensor::PadOp, linalg::CopyOp,
-             linalg::TransposeOp>(op);
+  if (isa<tensor::ExpandShapeOp, tensor::CollapseShapeOp,
+          tensor::ExtractSliceOp, tensor::PadOp, linalg::CopyOp,
+          linalg::TransposeOp>(op)) {
+    return true;
+  }
+  auto genericOp = dyn_cast<linalg::GenericOp>(op);
+  return genericOp && isBroadcastGenericOp(genericOp);
 }
 
 // This is only desirable in the dispatch scope but not in the workgroup scope.
@@ -869,8 +905,11 @@ static FailureOr<MapGatherOp> foldConsumerIntoMapGatherImpl(
 static FailureOr<MapGatherOp>
 foldIdentityLikeOpIntoMapGather(RewriterBase &rewriter, Operation *op,
                                 MapGatherOp mapGatherOp) {
-  assert(op->getOperand(0) == mapGatherOp.getResult(0) &&
-         "expected mapGatherOp to be the producer of op input");
+  if (op->getOperand(0) != mapGatherOp.getResult(0)) {
+    return rewriter.notifyMatchFailure(
+        op,
+        "op input is not the map_gather result (e.g. copy uses it as dest)");
+  }
   rewriter.replaceOp(op, mapGatherOp.getResult(0));
   LDBG() << "Folded consumer " << op->getName().getStringRef()
          << " into map_gather (identity fold)";
@@ -987,6 +1026,35 @@ foldExtractSliceIntoMapGather(RewriterBase &rewriter,
                                        indexTransformBuilder);
 }
 
+/// Fold a consumer broadcast/copy `linalg.generic` into a producer
+/// `mapGatherOp`. The generic's input indexing map projects output indices to
+/// input indices (e.g. (d0,d1,d2,d3) -> (d0,d1)); we use that to map new output
+/// indices to the existing map_gather output (generic input) indices.
+static FailureOr<MapGatherOp>
+foldBroadcastGenericIntoMapGather(RewriterBase &rewriter,
+                                  linalg::GenericOp genericOp,
+                                  MapGatherOp mapGatherOp) {
+  assert(genericOp.getDpsInputs()[0] == mapGatherOp.getResult(0) &&
+         "expected mapGatherOp to be the producer of genericOp input");
+  if (!isBroadcastGenericOp(genericOp)) {
+    return rewriter.notifyMatchFailure(genericOp,
+                                       "generic op is not a broadcast/copy");
+  }
+
+  AffineMap inputMap = genericOp.getIndexingMapsArray()[0];
+  return foldConsumerIntoMapGatherImpl(
+      rewriter, genericOp, mapGatherOp,
+      [inputMap](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
+        SmallVector<Value> sourceIndices;
+        sourceIndices.reserve(inputMap.getNumResults());
+        for (AffineExpr expr : inputMap.getResults()) {
+          unsigned pos = cast<AffineDimExpr>(expr).getPosition();
+          sourceIndices.push_back(indices[pos]);
+        }
+        return sourceIndices;
+      });
+}
+
 /// Fold a consumer `padOp` into a producer `mapGatherOp`.
 /// Index transformation: source_idx = new_idx - low_pad
 /// Fill value is set to the pad value.
@@ -1056,6 +1124,10 @@ FailureOr<MapGatherOp> foldIntoMapGather(RewriterBase &rewriter, Operation *op,
       .Case<tensor::PadOp>([&](tensor::PadOp padOp) {
         return foldPadIntoMapGather(rewriter, padOp, mapGatherOp);
       })
+      // .Case<linalg::GenericOp>([&](linalg::GenericOp genericOp) {
+      //   return foldBroadcastGenericIntoMapGather(rewriter, genericOp,
+      //                                            mapGatherOp);
+      // })
       .Default([](Operation *) { return failure(); });
 }
 
@@ -1066,10 +1138,13 @@ struct FoldConsumerRelayoutIntoMapGatherPattern
 
   LogicalResult matchAndRewrite(IREE::LinalgExt::MapGatherOp mapGatherOp,
                                 PatternRewriter &rewriter) const override {
-    // Find a consumer relayout op.
+    // Find a consumer relayout op that uses the map_gather result as its
+    // source (input), not as destination.
     Operation *consumerOp = nullptr;
+    Value mapGatherResult = mapGatherOp.getResult(0);
     for (Operation *user : mapGatherOp->getUsers()) {
-      if (isSupportedSingleInputRelayoutOp(user)) {
+      if (isSupportedSingleInputRelayoutOp(user) &&
+          user->getOperand(0) == mapGatherResult) {
         consumerOp = user;
         break;
       }

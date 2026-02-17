@@ -38,7 +38,7 @@ static llvm::cl::opt<bool> clGPUTestCpromotion(
     "iree-codegen-test-c-promtion",
     llvm::cl::desc("C promote in specific case of elemetwise operations that "
                    "codegen cant yet support without it if also doing padding"),
-    llvm::cl::init(true));
+    llvm::cl::init(false));
 
 namespace mlir::iree_compiler::IREE::GPU {
 

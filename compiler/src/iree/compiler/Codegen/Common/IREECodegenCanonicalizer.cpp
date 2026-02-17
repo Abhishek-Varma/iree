@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "iree/compiler/Codegen/Common/Passes.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
@@ -69,6 +72,56 @@ static bool isTrivialSubViewOp(memref::SubViewOp subviewOp) {
   return llvm::equal(sourceMixedSizes, subviewOp.getMixedSizes());
 }
 
+/// Returns true if linalgOp is a broadcast. Handles both the named
+/// linalg.broadcast op and broadcast-like linalg.generic.
+static bool isBroadcastLinalgOp(linalg::LinalgOp linalgOp) {
+  if (isa<linalg::BroadcastOp>(linalgOp.getOperation())) {
+    return true;
+  }
+  auto genericOp = dyn_cast<linalg::GenericOp>(linalgOp.getOperation());
+  return genericOp && linalg::isaBroadcastOpInterface(genericOp).has_value();
+}
+
+/// For a broadcast LinalgOp (named or generic), returns the single input and
+/// init values. Call only when isBroadcastLinalgOp returned true.
+static std::pair<Value, Value> getBroadcastInputAndInit(linalg::LinalgOp op) {
+  if (auto broadcastOp = dyn_cast<linalg::BroadcastOp>(op.getOperation())) {
+    return {broadcastOp.getInput(), broadcastOp.getInit()};
+  }
+  auto genericOp = cast<linalg::GenericOp>(op.getOperation());
+  return {genericOp.getDpsInputOperand(0)->get(),
+          genericOp.getDpsInitOperand(0)->get()};
+}
+
+/// Fold broadcast(tensor.empty()) -> tensor.empty() with the broadcast result
+/// shape. Handles both linalg.broadcast and broadcast-like linalg.generic.
+/// Placed in codegen canonicalizer so it runs on dispatch IR where the pattern
+/// is applied (Flow canonicalize runs at module level and may not see nested
+/// executables).
+class FoldBroadcastWithEmptyTensor
+    : public OpInterfaceRewritePattern<linalg::LinalgOp> {
+  using OpInterfaceRewritePattern<linalg::LinalgOp>::Base::Base;
+
+  LogicalResult matchAndRewrite(linalg::LinalgOp linalgOp,
+                                PatternRewriter &rewriter) const override {
+    if (!isBroadcastLinalgOp(linalgOp)) {
+      return rewriter.notifyMatchFailure(linalgOp, "not a broadcast op");
+    }
+    auto [input, init] = getBroadcastInputAndInit(linalgOp);
+    if (!input.getDefiningOp<tensor::EmptyOp>()) {
+      return rewriter.notifyMatchFailure(linalgOp,
+                                         "input not defined by tensor.empty");
+    }
+    SmallVector<OpFoldResult> resultSizes =
+        tensor::getMixedSizes(rewriter, linalgOp.getLoc(), init);
+    auto resultType = cast<RankedTensorType>(init.getType());
+    Value newEmpty = tensor::EmptyOp::create(
+        rewriter, linalgOp.getLoc(), resultSizes, resultType.getElementType());
+    rewriter.replaceOp(linalgOp.getOperation(), newEmpty);
+    return success();
+  }
+};
+
 /// Canonicalize subview ops that are no-ops, using Util::ShapeAwareOpInterface
 /// to check dynamic subviews.
 /// TODO(Max191): Fold this pattern into TrivialSubViewOpFolder in llvm-project
@@ -116,6 +169,7 @@ public:
       }
       op.getCanonicalizationPatterns(owningPatterns, context);
     }
+    owningPatterns.add<FoldBroadcastWithEmptyTensor>(context);
 
     patterns =
         std::make_shared<FrozenRewritePatternSet>(std::move(owningPatterns));

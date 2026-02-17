@@ -182,3 +182,35 @@ func.func @nested_pads_different_values(%buffer : memref<8x16xf32>) -> tensor<14
 // Second pad is NOT folded because the map_gather already has a padding value.
 //       CHECK:   tensor.pad
 //       CHECK:     tensor.yield %[[CST1]] : f32
+
+// -----
+
+// Test folding broadcast linalg.generic into map_gather.
+// load_from_buffer -> (pass inserts identity map_gather) -> generic broadcast 2x3 -> 2x3x4x5
+// After fold: single map_gather with source 2x3, output 2x3x4x5, indexing (d0,d1,d2,d3) -> (d0,d1).
+func.func @fold_broadcast_generic(%buffer : memref<2x3xf32>) -> tensor<2x3x4x5xf32> {
+  %source = iree_codegen.load_from_buffer %buffer : memref<2x3xf32> -> tensor<2x3xf32>
+  %init = tensor.empty() : tensor<2x3x4x5xf32>
+  %broadcast = linalg.generic {
+    indexing_maps = [
+      affine_map<(d0, d1, d2, d3) -> (d0, d1)>,
+      affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+    ],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+  } ins(%source : tensor<2x3xf32>) outs(%init : tensor<2x3x4x5xf32>) {
+  ^bb0(%in: f32, %out: f32):
+    linalg.yield %in : f32
+  } -> tensor<2x3x4x5xf32>
+  return %broadcast : tensor<2x3x4x5xf32>
+}
+// CHECK-LABEL: @fold_broadcast_generic
+//  CHECK-SAME:   %[[BUFFER:[a-zA-Z0-9_]+]]
+//       CHECK:   %[[SOURCE:.+]] = iree_codegen.load_from_buffer %[[BUFFER]]
+//       CHECK:   %[[DEST:.+]] = tensor.empty() : tensor<2x3x4x5xf32>
+//   CHECK-NOT:   linalg.generic
+//       CHECK:   %[[MAP_GATHER:.+]] = iree_linalg_ext.map_gather
+//  CHECK-SAME:     %[[SOURCE]] into %[[DEST]] {
+//  CHECK-NEXT:   ^bb0(%[[IDX0:.+]]: index, %[[IDX1:.+]]: index, %[[IDX2:.+]]: index, %[[IDX3:.+]]: index):
+// Broadcast: output (d0,d1,d2,d3) reads from source at (d0,d1)
+//       CHECK:     iree_linalg_ext.yield %[[IDX0]], %[[IDX1]],
+//       CHECK:   } : tensor<2x3xf32> into tensor<2x3x4x5xf32> -> tensor<2x3x4x5xf32>
