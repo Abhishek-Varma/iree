@@ -707,7 +707,7 @@ module {
 // -----
 
 // Verify that batchless convolutions (convolutions without batch dimension)
-// are vectorized after batch dimension insertion in the pipeline.
+// are assigned the ConvTileAndDecomposeExpert pipeline and vectorized.
 
 #pipeline_layout_batchless = #hal.pipeline.layout<bindings = [
   #hal.pipeline.binding<storage_buffer>,
