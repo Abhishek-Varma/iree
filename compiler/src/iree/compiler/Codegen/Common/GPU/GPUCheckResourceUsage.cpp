@@ -7,6 +7,7 @@
 #include "iree/compiler/Codegen/Common/GPU/Passes.h"
 #include "iree/compiler/Codegen/Utils/GPUUtils.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/MathExtras.h"
 #include "mlir/Conversion/LLVMCommon/LoweringOptions.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
@@ -24,28 +25,43 @@ static unsigned getDatalayoutIndexBitwidth(mlir::FunctionOpInterface func) {
   return options.getIndexBitwidth();
 }
 
-static int shapedTypeStaticSize(
+/// Returns the static allocation size in bits for `shapedType`. Dynamic dims
+/// are skipped (the caller has already verified the alloc has no dynamic
+/// sizes). Returns `failure()` on 64-bit signed overflow.
+static FailureOr<int64_t> shapedTypeStaticSizeInBits(
     memref::AllocOp allocOp, ShapedType shapedType,
     std::function<unsigned(mlir::FunctionOpInterface)> getIndexBitwidth) {
-  int allocSize = 1;
-  for (auto dimSize : shapedType.getShape()) {
+  int64_t allocSize = 1;
+  for (int64_t dimSize : shapedType.getShape()) {
     if (ShapedType::isDynamic(dimSize)) {
       continue;
     }
-    allocSize *= dimSize;
+    if (llvm::MulOverflow(allocSize, dimSize, allocSize)) {
+      return failure();
+    }
   }
+
+  int64_t elementSizeInBits;
   if (auto elementType = dyn_cast<ShapedType>(shapedType.getElementType())) {
-    allocSize *= shapedTypeStaticSize(allocOp, elementType, getIndexBitwidth);
+    FailureOr<int64_t> nestedSize =
+        shapedTypeStaticSizeInBits(allocOp, elementType, getIndexBitwidth);
+    if (failed(nestedSize)) {
+      return failure();
+    }
+    elementSizeInBits = *nestedSize;
   } else {
     auto eltTy = shapedType.getElementType();
     if (eltTy.isIndex()) {
       auto func = allocOp->getParentOfType<mlir::FunctionOpInterface>();
       assert(getIndexBitwidth &&
              "getIndexBitwidth should have been set earlier");
-      allocSize *= getIndexBitwidth(func);
+      elementSizeInBits = getIndexBitwidth(func);
     } else {
-      allocSize *= IREE::Util::getTypeBitWidth(shapedType.getElementType());
+      elementSizeInBits = IREE::Util::getTypeBitWidth(shapedType.getElementType());
     }
+  }
+  if (llvm::MulOverflow(allocSize, elementSizeInBits, allocSize)) {
+    return failure();
   }
   return allocSize;
 }
@@ -65,7 +81,7 @@ static LogicalResult checkGPUAllocationSize(
     return success();
   }
 
-  int cumSize = 0;
+  int64_t cumSize = 0;
   for (auto allocOp : allocOps) {
     auto allocType = cast<MemRefType>(allocOp.getType());
     if (!hasSharedMemoryAddressSpace(allocType)) {
@@ -77,13 +93,29 @@ static LogicalResult checkGPUAllocationSize(
           "has unsupported dynamic shared memory allocations");
     }
 
-    int allocSize = shapedTypeStaticSize(allocOp, allocType, getIndexBitwidth);
+    FailureOr<int64_t> allocSizeOr =
+        shapedTypeStaticSizeInBits(allocOp, allocType, getIndexBitwidth);
+    if (failed(allocSizeOr)) {
+      return allocOp.emitOpError("shared memory allocation of type ")
+             << allocType
+             << " has a size that does not fit in a signed 64-bit integer";
+    }
+    int64_t allocSize = *allocSizeOr;
     if (allocOp.getAlignment()) {
       int64_t alignmentInBits = *allocOp.getAlignment() * 8;
-      allocSize =
-          (llvm::divideCeil(allocSize, alignmentInBits) * alignmentInBits);
+      int64_t numChunks = llvm::divideCeil(allocSize, alignmentInBits);
+      if (llvm::MulOverflow(numChunks, alignmentInBits, allocSize)) {
+        return allocOp.emitOpError("shared memory allocation of type ")
+               << allocType
+               << " has a size that does not fit in a signed 64-bit integer "
+                  "after alignment padding";
+      }
     }
-    cumSize += allocSize / 8;
+    if (llvm::AddOverflow(cumSize, allocSize / 8, cumSize)) {
+      return allocOp.emitOpError(
+          "cumulative shared memory allocation size overflows a signed 64-bit "
+          "integer");
+    }
   }
   if (cumSize > limit) {
     return emitError(funcOp->getLoc())

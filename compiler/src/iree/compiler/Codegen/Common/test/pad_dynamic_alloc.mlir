@@ -1,4 +1,4 @@
-// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-codegen-pad-dynamic-alloc))" --split-input-file --mlir-print-local-scope %s | FileCheck %s
+// RUN: iree-opt --pass-pipeline="builtin.module(func.func(iree-codegen-pad-dynamic-alloc))" --split-input-file --verify-diagnostics --mlir-print-local-scope %s | FileCheck %s
 
 // CHECK-LABEL: dynamic_alloc
 func.func @dynamic_alloc(%id : index) {
@@ -69,3 +69,19 @@ func.func @dynamic_alloc_collapse_consumer(%id : index) {
 //       CHECK:   %[[COLLAPSE:.+]] = memref.collapse_shape %[[SUBVIEW]] {{\[}}[0, 1]]
 //  CHECK-SAME:     : memref<?x32xf32, strided<[32, 1]>, 3> into memref<?xf32, strided<[1]>, 3>
 //       CHECK:   memref.store {{.*}} %[[COLLAPSE]]{{.*}} : memref<?xf32, strided<[1]>, 3>
+
+// -----
+
+// Regression test for https://github.com/iree-org/iree/issues/24149. Turbine /
+// Sharktank emit `util.assume.int<umax = 9007199254740991>` (2^53-1, the
+// JS-safe-integer sentinel) for dynamic sequence lengths. Before this pass
+// sanity-checked the inferred upper bound, it would happily materialize a
+// memref with a 9e15 static dim and let downstream passes trip over it
+// (e.g. GPUCheckResourceUsage printing "uses -8192 bytes of shared memory").
+// Now the bad bound is blamed on this pass with an actionable message.
+func.func @dynamic_alloc_umax_2_pow_53(%id : index) {
+  %0 = util.assume.int %id<umin = 0, umax = 9007199254740991> : index
+  // expected-error @+1 {{'memref.alloc' op padded allocation element count}}
+  %1 = memref.alloc(%0) : memref<32x?x2x64xf16, #gpu.address_space<workgroup>>
+  return
+}

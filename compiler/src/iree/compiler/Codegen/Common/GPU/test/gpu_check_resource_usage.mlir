@@ -29,3 +29,19 @@ module {
     return
   }
 }
+
+// -----
+
+// Regression test for https://github.com/iree-org/iree/issues/24149. Before the
+// byte accounting was widened to int64_t, an allocation whose bit count
+// exceeded int32 range would silently wrap to a small (often negative) number
+// and either pass the check spuriously or produce a nonsensical diagnostic
+// like "uses -8192 bytes of shared memory". The pass must now emit a clear
+// error on the offending alloc instead.
+module {
+  func.func @shared_mem_alloc_overflows_int64() {
+    // expected-error @+1 {{'memref.alloc' op shared memory allocation of type 'memref<32x9007199254740991x2x64xf16, #gpu.address_space<workgroup>>' has a size that does not fit in a signed 64-bit integer}}
+    memref.alloc() : memref<32x9007199254740991x2x64xf16, #gpu.address_space<workgroup>>
+    return
+  }
+}

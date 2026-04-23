@@ -6,6 +6,9 @@
 
 #include "iree/compiler/Codegen/Common/Passes.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/InterleavedRange.h"
+#include "llvm/Support/MathExtras.h"
 #include "mlir/Analysis/DataFlow/DeadCodeAnalysis.h"
 #include "mlir/Analysis/DataFlow/IntegerRangeAnalysis.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -16,6 +19,26 @@ namespace mlir::iree_compiler {
 
 #define GEN_PASS_DEF_PADDYNAMICALLOCPASS
 #include "iree/compiler/Codegen/Common/Passes.h.inc"
+
+// Cap on the total padded element count of a single allocation. Dynamic
+// allocations whose inferred upper bounds multiply out to more than this are
+// almost certainly the result of a bogus upper bound (e.g. Turbine's standard
+// `umax = 2^53-1` sentinel for a dynamic sequence length) rather than a real
+// program. Rather than silently materialize a nonsensical static type and
+// trip later passes (or, worse, overflow their 32-bit byte accounting), we
+// fail loudly here so the diagnostic points at the actual allocation whose
+// bound is wrong.
+//
+// Default 2^30 (~1 G elements, i.e. ~2 GiB for f16). Users with legitimately
+// huge device-memory allocations can raise the cap via the developer flag.
+static llvm::cl::opt<int64_t> clMaxPaddedAllocElements(
+    "iree-codegen-pad-dynamic-alloc-max-elements",
+    llvm::cl::desc("developer flag: upper bound on the total element count of "
+                   "a single allocation after padding dynamic dims to their "
+                   "inferred upper bounds. Allocations whose padded element "
+                   "count exceeds this cap (or overflows int64) are rejected "
+                   "with an error."),
+    llvm::cl::Hidden, llvm::cl::init(int64_t(1) << 30));
 
 /// If a value is defined by `%dim = affine_max(0, %src)` kind of op return
 /// `%src` otherwise return `%dim`.
@@ -62,12 +85,47 @@ static LogicalResult padAlloc(MLIRContext *context, AllocLikeOp allocOp,
       return allocOp.emitOpError(
           "unexpected allocation without upper bound shapes");
     }
+    if (*ub < 0) {
+      return allocOp.emitOpError(
+                 "has negative inferred upper bound for dynamic dim ")
+             << (dynamicDimIdx - 1) << ": " << *ub;
+    }
     dimSize = *ub;
     sizes.push_back(dim);
   }
   if (dynamicDimIdx == 0) {
     return success();
   }
+
+  // Sanity-check the padded shape against a configurable cap. This catches
+  // cases where the integer-range solver returned a nonsensical upper bound
+  // (e.g. `util.assume.int<umax = 9007199254740991>`, which is the Turbine /
+  // Sharktank sentinel for "any 53-bit safe integer") for some dynamic dim.
+  // Without this check we would materialize a multi-exabyte static type and
+  // the error would only surface much later (if at all) in a confusing form.
+  int64_t elementCount = 1;
+  for (int64_t d : shape) {
+    if (llvm::MulOverflow(elementCount, d, elementCount)) {
+      return allocOp.emitOpError(
+                 "padded allocation element count overflows int64; at least "
+                 "one inferred dynamic-dim upper bound is almost certainly "
+                 "incorrect. Padded shape: ")
+             << "[" << llvm::interleaved(shape) << "]";
+    }
+  }
+  if (elementCount > clMaxPaddedAllocElements) {
+    return allocOp.emitOpError(
+               "padded allocation element count (")
+           << elementCount << ") exceeds the configured cap ("
+           << clMaxPaddedAllocElements.getValue()
+           << "); at least one inferred dynamic-dim upper bound is almost "
+              "certainly incorrect. Padded shape: "
+           << "[" << llvm::interleaved(shape) << "]"
+           << ". Raise the cap via "
+              "--iree-codegen-pad-dynamic-alloc-max-elements if this "
+              "allocation is intentional.";
+  }
+
   Type elType = allocOp.getType().getElementType();
   MemRefType allocType = MemRefType::get(shape, elType, AffineMap(),
                                          allocOp.getType().getMemorySpace());
