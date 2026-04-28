@@ -1870,7 +1870,9 @@ util.func public @no_fusion_use_from_above(%arg0 : tensor<?x?xf32>,
 
 // -----
 
-util.func public @dont_fuse_no_shared_parallel_loops(%arg0: tensor<16x16x24xf32>, %arg1: tensor<64x3x32xf32>) -> (tensor<64x3x32xf32>, tensor<32x64x3xf32>) {
+// A full reduction to a scalar feeding a parallel consumer fuses even
+// when they share no input.
+util.func public @fuse_no_shared_parallel_loops(%arg0: tensor<16x16x24xf32>, %arg1: tensor<64x3x32xf32>) -> (tensor<64x3x32xf32>, tensor<32x64x3xf32>) {
   %cst = arith.constant 0.000000e+00 : f32
   %0 = tensor.empty() : tensor<f32>
   %1 = tensor.empty() : tensor<64x3x32xf32>
@@ -1889,18 +1891,18 @@ util.func public @dont_fuse_no_shared_parallel_loops(%arg0: tensor<16x16x24xf32>
   } -> (tensor<64x3x32xf32>, tensor<32x64x3xf32>)
   util.return %5#0, %5#1 : tensor<64x3x32xf32>, tensor<32x64x3xf32>
 }
-// CHECK-LABEL: util.func public @dont_fuse_no_shared_parallel_loops(
+// CHECK-LABEL: util.func public @fuse_no_shared_parallel_loops(
 //  CHECK-SAME:     %[[ARG0:[a-zA-Z0-9]+]]: tensor<16x16x24xf32>
 //  CHECK-SAME:     %[[ARG1:[a-zA-Z0-9]+]]: tensor<64x3x32xf32>)
-//       CHECK:   %[[DISPATCH0:.+]] = flow.dispatch.region
-//       CHECK:   %[[REDUCTION:.+]] = linalg.generic
-//  CHECK-SAME:       ins(%[[ARG0]]
-//       CHECK:     flow.return %[[REDUCTION]]
-//       CHECK:   %[[DISPATCH1:.+]]:2 = flow.dispatch.region
+//       CHECK:   %[[DISPATCH:.+]]:2 = flow.dispatch.region
+//       CHECK:     %[[REDUCTION:.+]] = linalg.generic
+//  CHECK-SAME:         iterator_types = ["reduction", "reduction", "reduction"]
+//  CHECK-SAME:         ins(%[[ARG0]]
 //       CHECK:     %[[GENERIC:.+]]:2 = linalg.generic
-//  CHECK-SAME:       ins(%[[ARG1]], %[[DISPATCH0]]
+//  CHECK-SAME:         iterator_types = ["parallel", "parallel", "parallel"]
+//  CHECK-SAME:         ins(%[[ARG1]], %[[REDUCTION]]
 //       CHECK:     flow.return %[[GENERIC]]#0, %[[GENERIC]]#1
-//       CHECK:   util.return %[[DISPATCH1]]#0, %[[DISPATCH1]]#1
+//       CHECK:   util.return %[[DISPATCH]]#0, %[[DISPATCH]]#1
 
 // -----
 
