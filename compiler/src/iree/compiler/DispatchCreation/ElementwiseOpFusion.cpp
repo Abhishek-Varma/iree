@@ -18,6 +18,7 @@
 #include "iree/compiler/Dialect/LinalgExt/Utils/Utils.h"
 #include "iree/compiler/DispatchCreation/FusionUtils.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
@@ -29,6 +30,13 @@ namespace mlir::iree_compiler::DispatchCreation {
 
 #define GEN_PASS_DEF_ELEMENTWISEOPFUSIONPASS
 #include "iree/compiler/DispatchCreation/Passes.h.inc"
+
+static llvm::cl::opt<unsigned> clGatherRematMaxExtractSites(
+    "iree-dispatch-creation-gather-remat-max-extract-sites",
+    llvm::cl::desc("Developer flag: maximum number of `tensor.extract` "
+                   "sites in a `linalg.generic` consumer that target "
+                   "`linalg.generic` producers."),
+    llvm::cl::Hidden, llvm::cl::init(4));
 
 namespace {
 struct ElementwiseOpFusionPass final
@@ -127,8 +135,21 @@ struct GatherFusionPattern final : OpRewritePattern<tensor::ExtractOp> {
     }
 
     // Check if the producerOp is fusible.
-    // Allow any single-result elementwise generic op.
-    if (producerOp.getNumResults() != 1 || !isElementwise(producerOp)) {
+    // Allow bit extend ops or transpose ops or any single-result elementwise
+    // generic op gated by the number of extract sites in the consumer.
+    bool isBitExtend = IREE::LinalgExt::isBitExtendOp(producerOp);
+    bool isTranspose = IREE::LinalgExt::isaTransposeOpInterface(producerOp);
+    unsigned numConsumerRematCandidateSites = 0;
+    consumerOp.getRegion().walk([&](tensor::ExtractOp extract) {
+      if (isa_and_nonnull<linalg::GenericOp>(
+              extract.getTensor().getDefiningOp())) {
+        ++numConsumerRematCandidateSites;
+      }
+    });
+    bool consumerHasMoreExtractSites =
+        numConsumerRematCandidateSites > clGatherRematMaxExtractSites;
+    if (producerOp.getNumResults() != 1 || !isElementwise(producerOp) ||
+        (!isBitExtend && !isTranspose && consumerHasMoreExtractSites)) {
       return rewriter.notifyMatchFailure(producerOp,
                                          "producer op is not fusible");
     }
