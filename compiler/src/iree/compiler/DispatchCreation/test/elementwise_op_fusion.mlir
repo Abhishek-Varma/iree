@@ -1,4 +1,18 @@
-// RUN: iree-opt --iree-dispatch-creation-elementwise-op-fusion --split-input-file --mlir-print-local-scope  %s | FileCheck %s
+// The default RUN line exercises the pass with
+// `--iree-dispatch-creation-gather-remat-max-body-ops` at its default (4).
+// The second RUN line forces the cap to 0, which disables the
+// cheap-elementwise admission added for issue #24149 while leaving the
+// original bit-extend / transpose admissions untouched. Tests whose
+// expected output differs between the two modes carry both default check
+// directives and DISABLED-prefixed ones; everything else is implicitly
+// only checked under the default RUN.
+
+// RUN: iree-opt --iree-dispatch-creation-elementwise-op-fusion \
+// RUN:     --split-input-file --mlir-print-local-scope %s | FileCheck %s
+// RUN: iree-opt --iree-dispatch-creation-elementwise-op-fusion \
+// RUN:     --iree-dispatch-creation-gather-remat-max-body-ops=0 \
+// RUN:     --split-input-file --mlir-print-local-scope %s \
+// RUN:     | FileCheck %s --check-prefix=DISABLED
 
 util.func public @transpose_attention(%arg0: tensor<4x64x32x128xf16>, %arg1: tensor<4x64x32x128xf16>, %arg2: tensor<4x64x32x128xf16>, %arg3: f16) -> tensor<4x64x4096xf16> {
   %0 = tensor.empty() : tensor<4x32x64x128xf16>
@@ -158,6 +172,16 @@ util.func public @fuse_generic_gather(
 // CHECK-NEXT:    %[[EXTRACTED:.*]] = tensor.extract %[[TENSOR0:.+]][%[[INDEX0]], %[[INDEX1]]] : tensor<128256x4096xf16>
 // CHECK-NEXT:    %[[RES:[a-zA-Z0-9]+]] = arith.extf %[[EXTRACTED]] : f16 to f32
 // CHECK-NEXT:    linalg.yield %[[RES]] : f32
+
+// The bit-extend admission in `GatherFusionPattern` is independent of
+// `iree-dispatch-creation-gather-remat-max-body-ops`, so this pair must
+// still fuse with `=0`. Scoping guarantee on the cap.
+// DISABLED-LABEL: util.func public @fuse_generic_gather(
+//       DISABLED:   %[[INDEX0:[a-zA-Z0-9]+]] = arith.index_cast %in : i64 to index
+//       DISABLED:   %[[INDEX1:[a-zA-Z0-9]+]] = linalg.index 2 : index
+//  DISABLED-NEXT:   %[[EXTRACTED:.*]] = tensor.extract %{{.+}}[%[[INDEX0]], %[[INDEX1]]] : tensor<128256x4096xf16>
+//  DISABLED-NEXT:   %[[RES:[a-zA-Z0-9]+]] = arith.extf %[[EXTRACTED]] : f16 to f32
+//  DISABLED-NEXT:   linalg.yield %[[RES]] : f32
 
 
 // -----
@@ -757,3 +781,112 @@ util.func public @fuse_transpose_with_index_flip(%arg0: tensor<64x3x3x64xbf16>) 
 //       CHECK:       %[[EXTRACT:.+]] = tensor.extract %[[ARG0]][%[[IDX0]], %[[SUB0]], %[[SUB1]], %[[IDX1]]] : tensor<64x3x3x64xbf16>
 //       CHECK:       linalg.yield %[[EXTRACT]] : bf16
 //       CHECK:   util.return %[[RESULT]]
+
+// -----
+
+// Tests a producer that is neither bit-extend nor transpose, feeding a consumer
+// that extracts from it at a permuted index.
+util.func public @fuse_cheap_elementwise_into_gather(
+    %q: tensor<32x8x2x64xf16>, %cos: tensor<32x8x2x64xf16>,
+    %out: tensor<32x8x2x64xf16>) -> tensor<32x8x2x64xf16> {
+  %c1 = arith.constant 1 : index
+  %empty = tensor.empty() : tensor<32x8x2x64xf16>
+  %prod = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>,
+                       affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>,
+                       affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]}
+      ins(%q, %cos : tensor<32x8x2x64xf16>, tensor<32x8x2x64xf16>)
+      outs(%empty : tensor<32x8x2x64xf16>) {
+  ^bb0(%a: f16, %b: f16, %_: f16):
+    %add = arith.addf %a, %b : f16
+    %mul = arith.mulf %a, %add : f16
+    linalg.yield %mul : f16
+  } -> tensor<32x8x2x64xf16>
+  %cons = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>],
+      iterator_types = ["parallel", "parallel", "parallel", "parallel"]}
+      outs(%out : tensor<32x8x2x64xf16>) {
+  ^bb0(%_: f16):
+    %i0 = linalg.index 0 : index
+    %i1 = linalg.index 1 : index
+    %i2 = linalg.index 2 : index
+    %i3 = linalg.index 3 : index
+    %swapped = arith.subi %c1, %i2 : index
+    %ext = tensor.extract %prod[%i0, %i1, %swapped, %i3] : tensor<32x8x2x64xf16>
+    linalg.yield %ext : f16
+  } -> tensor<32x8x2x64xf16>
+  util.return %cons : tensor<32x8x2x64xf16>
+}
+// CHECK-LABEL: @fuse_cheap_elementwise_into_gather(
+//  CHECK-SAME:   %[[Q:[A-Za-z0-9]+]]: tensor<32x8x2x64xf16>
+//  CHECK-SAME:   %[[COS:[A-Za-z0-9]+]]: tensor<32x8x2x64xf16>
+//   CHECK-DAG:   %[[C1:.+]] = arith.constant 1 : index
+//       CHECK:   %[[RESULT:.+]] = linalg.generic
+//       CHECK:     ^bb0(%{{.+}}: f16):
+//   CHECK-DAG:       %[[I0:.+]] = linalg.index 0 : index
+//   CHECK-DAG:       %[[I1:.+]] = linalg.index 1 : index
+//   CHECK-DAG:       %[[I2:.+]] = linalg.index 2 : index
+//   CHECK-DAG:       %[[I3:.+]] = linalg.index 3 : index
+//       CHECK:       %[[SWAP:.+]] = arith.subi %[[C1]], %[[I2]] : index
+//   CHECK-DAG:       %[[EQ:.+]] = tensor.extract %[[Q]][%[[I0]], %[[I1]], %[[SWAP]], %[[I3]]]
+//   CHECK-DAG:       %[[EC:.+]] = tensor.extract %[[COS]][%[[I0]], %[[I1]], %[[SWAP]], %[[I3]]]
+//       CHECK:       %[[ADD:.+]] = arith.addf %[[EQ]], %[[EC]] : f16
+//       CHECK:       %[[MUL:.+]] = arith.mulf %[[EQ]], %[[ADD]] : f16
+//       CHECK:       linalg.yield %[[MUL]] : f16
+//       CHECK:   util.return %[[RESULT]]
+//   CHECK-NOT:   linalg.generic
+
+// Under --iree-dispatch-creation-gather-remat-max-body-ops=0 the
+// cheap-elementwise admission is disabled, so the producer survives with
+// its full two-op body and the consumer keeps its tensor.extract on it.
+// DISABLED-LABEL: @fuse_cheap_elementwise_into_gather(
+//       DISABLED:   %[[PROD:.+]] = linalg.generic
+//       DISABLED:   %[[CONS:.+]] = linalg.generic
+//       DISABLED:     tensor.extract %[[PROD]]
+//       DISABLED:   util.return %[[CONS]]
+
+// -----
+
+// Tests a producer whose body contains more "real" ops than the configured
+// threshold (default 4). The producer is elementwise but expensive enough
+// that rematerialising it at every `tensor.extract` site in the consumer
+// would duplicate substantial compute.
+util.func public @dont_fuse_expensive_elementwise_into_gather(
+    %arg0: tensor<256x256xf32>, %arg1: tensor<256x256xf32>,
+    %out: tensor<256x256xf32>) -> tensor<256x256xf32> {
+  %c1 = arith.constant 1 : index
+  %empty = tensor.empty() : tensor<256x256xf32>
+  %prod = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]}
+      ins(%arg0, %arg1 : tensor<256x256xf32>, tensor<256x256xf32>)
+      outs(%empty : tensor<256x256xf32>) {
+  ^bb0(%a: f32, %b: f32, %_: f32):
+    %0 = arith.mulf %a, %b : f32
+    %1 = arith.addf %0, %a : f32
+    %2 = arith.subf %1, %b : f32
+    %3 = arith.mulf %2, %2 : f32
+    %4 = arith.addf %3, %0 : f32
+    linalg.yield %4 : f32
+  } -> tensor<256x256xf32>
+  %cons = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]}
+      outs(%out : tensor<256x256xf32>) {
+  ^bb0(%_: f32):
+    %i0 = linalg.index 0 : index
+    %i1 = linalg.index 1 : index
+    %swapped = arith.subi %c1, %i1 : index
+    %ext = tensor.extract %prod[%i0, %swapped] : tensor<256x256xf32>
+    linalg.yield %ext : f32
+  } -> tensor<256x256xf32>
+  util.return %cons : tensor<256x256xf32>
+}
+// CHECK-LABEL: @dont_fuse_expensive_elementwise_into_gather(
+//       CHECK:   %[[PROD:.+]] = linalg.generic
+//       CHECK:   %[[CONS:.+]] = linalg.generic
+//       CHECK:     tensor.extract %[[PROD]]
+//       CHECK:   util.return %[[CONS]]

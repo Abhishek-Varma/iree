@@ -18,8 +18,10 @@
 #include "iree/compiler/Dialect/LinalgExt/Utils/Utils.h"
 #include "iree/compiler/DispatchCreation/FusionUtils.h"
 #include "iree/compiler/DispatchCreation/Passes.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -29,6 +31,37 @@ namespace mlir::iree_compiler::DispatchCreation {
 
 #define GEN_PASS_DEF_ELEMENTWISEOPFUSIONPASS
 #include "iree/compiler/DispatchCreation/Passes.h.inc"
+
+static llvm::cl::opt<unsigned> clGatherRematMaxBodyOps(
+    "iree-dispatch-creation-gather-remat-max-body-ops",
+    llvm::cl::desc("developer flag: maximum number of 'real' ops a "
+                   "linalg.generic body can have for it to be eligible to be "
+                   "rematerialised at tensor.extract sites in a consumer via "
+                   "GatherFusionPattern. Producers with bodies above this "
+                   "threshold remain unfused via this pattern. Set to 0 to "
+                   "disable this remat path entirely."),
+    llvm::cl::Hidden, llvm::cl::init(4));
+
+// Counts ops in `genericOp`'s body that we treat as "real work" for the
+// purposes of remat at `tensor.extract` sites. The body is cloned at every
+// extract site, so each body op is a duplication source. Op kinds that are
+// free at codegen / fold away are excluded:
+//   - linalg.yield: the terminator, replaced by the inlined yield's operand.
+//   - linalg.index: lowers to a thread / loop induction variable.
+//   - arith.constant: hoisted / folded.
+// Everything else (arith / math / cmp / select / extf-truncf / side-input
+// `tensor.extract`, etc.) counts as 1.
+static unsigned countRematerializableBodyOps(linalg::GenericOp genericOp) {
+  unsigned count = 0;
+  Block &body = genericOp.getRegion().front();
+  for (Operation &op : body.without_terminator()) {
+    if (isa<linalg::IndexOp, arith::ConstantOp>(&op)) {
+      continue;
+    }
+    ++count;
+  }
+  return count;
+}
 
 namespace {
 struct ElementwiseOpFusionPass final
@@ -127,11 +160,14 @@ struct GatherFusionPattern final : OpRewritePattern<tensor::ExtractOp> {
     }
 
     // Check if the producerOp is fusible.
-    // Allow bit extend ops or transpose ops.
+    // Allow bit extend ops, transpose ops, or any cheap elementwise op.
     bool isBitExtend = IREE::LinalgExt::isBitExtendOp(producerOp);
     bool isTranspose = IREE::LinalgExt::isaTransposeOpInterface(producerOp);
+    bool isCheapElementwise =
+        isElementwise(producerOp) &&
+        countRematerializableBodyOps(producerOp) <= clGatherRematMaxBodyOps;
     if (producerOp.getNumResults() != 1 || !isElementwise(producerOp) ||
-        (!isBitExtend && !isTranspose)) {
+        (!isBitExtend && !isTranspose && !isCheapElementwise)) {
       return rewriter.notifyMatchFailure(producerOp,
                                          "producer op is not fusible");
     }
