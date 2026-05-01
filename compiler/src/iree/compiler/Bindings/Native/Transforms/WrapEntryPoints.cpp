@@ -611,7 +611,23 @@ createExportWrapperFunc(IREE::ABI::InvocationModel invocationModel,
                            << "; must be a !hal.buffer";
       return {};
     }
-    resultStorages[outputAttr.getInt()] = storageArg;
+    int64_t resultIndex = outputAttr.getInt();
+    if (resultIndex < 0 ||
+        resultIndex >= static_cast<int64_t>(resultStorages.size())) {
+      exportOp.emitError() << "iree.abi.output on argument " << i
+                           << " refers to result " << resultIndex
+                           << " but the function has only "
+                           << resultStorages.size() << " results";
+      return {};
+    }
+    if (resultStorages[resultIndex]) {
+      exportOp.emitError()
+          << "result " << resultIndex
+          << " has multiple iree.abi.output storage arguments; only one is "
+             "permitted";
+      return {};
+    }
+    resultStorages[resultIndex] = storageArg;
   }
 
   // Find the transient storage buffer if provided.
