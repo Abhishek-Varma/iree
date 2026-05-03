@@ -136,9 +136,14 @@ struct GatherFusionPattern final : OpRewritePattern<tensor::ExtractOp> {
 
     // Check if the producerOp is fusible.
     // Allow bit extend ops or transpose ops or any single-result elementwise
-    // generic op gated by the number of extract sites in the consumer.
+    // generic op gated by the number of extract sites in the consumer and by
+    // the presence of non-extract users on the producer.
     bool isBitExtend = IREE::LinalgExt::isBitExtendOp(producerOp);
     bool isTranspose = IREE::LinalgExt::isaTransposeOpInterface(producerOp);
+    bool producerHasOnlyExtractUsers =
+        llvm::all_of(producerOp.getResult(0).getUsers(), [](Operation *user) {
+          return isa<tensor::ExtractOp>(user);
+        });
     unsigned numConsumerRematCandidateSites = 0;
     consumerOp.getRegion().walk([&](tensor::ExtractOp extract) {
       if (isa_and_nonnull<linalg::GenericOp>(
@@ -149,7 +154,8 @@ struct GatherFusionPattern final : OpRewritePattern<tensor::ExtractOp> {
     bool consumerHasMoreExtractSites =
         numConsumerRematCandidateSites > clGatherRematMaxExtractSites;
     if (producerOp.getNumResults() != 1 || !isElementwise(producerOp) ||
-        (!isBitExtend && !isTranspose && consumerHasMoreExtractSites)) {
+        (!isBitExtend && !isTranspose &&
+         (!producerHasOnlyExtractUsers || consumerHasMoreExtractSites))) {
       return rewriter.notifyMatchFailure(producerOp,
                                          "producer op is not fusible");
     }
