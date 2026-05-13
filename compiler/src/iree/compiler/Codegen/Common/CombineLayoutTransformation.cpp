@@ -23,6 +23,7 @@
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Interfaces/DestinationStyleOpInterface.h"
+#include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/ValueBoundsOpInterface.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
@@ -1030,12 +1031,20 @@ static FailureOr<MapLoadOp> foldConsumerIntoMapLoadImpl(
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(consumerOp);
 
-  // Create new dest tensor matching consumer output shape.
+  // Reify against operands since we are about to replace `consumerOp` with
+  // `newMapLoad`, so dim queries on the result would loop back into the new
+  // map_load's destination.
   Value consumerResult = consumerOp->getResult(0);
   Type elementType = getElementTypeOrSelf(consumerResult.getType());
-  SmallVector<OpFoldResult> newSizes =
-      tensor::getMixedSizes(rewriter, loc, consumerResult);
-  Value newDest = tensor::EmptyOp::create(rewriter, loc, newSizes, elementType);
+  FailureOr<SmallVector<OpFoldResult>> newSizes =
+      reifyShapeOfResult(rewriter, consumerOp, /*resultIndex=*/0);
+  if (failed(newSizes)) {
+    return rewriter.notifyMatchFailure(
+        consumerOp,
+        "consumer does not implement ReifyRankedShapedTypeOpInterface");
+  }
+  Value newDest =
+      tensor::EmptyOp::create(rewriter, loc, *newSizes, elementType);
 
   // Clone the map_load with new dest.
   auto newMapLoad = MapLoadOp::create(rewriter, loc, newDest.getType(),
@@ -1122,14 +1131,23 @@ static FailureOr<MapLoadOp> foldReshapeIntoMapLoad(RewriterBase &rewriter,
     return failure();
   }
   Location loc = reshapeOp->getLoc();
-  SmallVector<OpFoldResult> srcDims =
-      tensor::getMixedSizes(rewriter, loc, reshapeOp.getSrc());
-  SmallVector<OpFoldResult> resultDims =
-      tensor::getMixedSizes(rewriter, loc, reshapeOp.getResult());
+  SmallVector<OpFoldResult> srcDims;
+  FailureOr<SmallVector<OpFoldResult>> resultDims;
+  {
+    OpBuilder::InsertionGuard g(rewriter);
+    rewriter.setInsertionPoint(reshapeOp);
+    srcDims = tensor::getMixedSizes(rewriter, loc, mapLoadOp.getOutput());
+    resultDims = reifyShapeOfResult(rewriter, reshapeOp, /*resultIndex=*/0);
+  }
+  if (failed(resultDims)) {
+    return rewriter.notifyMatchFailure(
+        reshapeOp,
+        "reshape does not implement ReifyRankedShapedTypeOpInterface");
+  }
 
   return foldConsumerIntoMapLoadImpl(
       rewriter, reshapeOp, mapLoadOp,
-      [&rewriter, loc, resultDims,
+      [&rewriter, loc, resultDims = *resultDims,
        srcDims](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
         SmallVector<Value> indexValues(indices.begin(), indices.end());
         auto linearizeIndexOp = affine::AffineLinearizeIndexOp::create(
