@@ -1031,9 +1031,8 @@ static FailureOr<MapLoadOp> foldConsumerIntoMapLoadImpl(
   OpBuilder::InsertionGuard g(rewriter);
   rewriter.setInsertionPoint(consumerOp);
 
-  // Reify against operands since we are about to replace `consumerOp` with
-  // `newMapLoad`, so dim queries on the result would loop back into the new
-  // map_load's destination.
+  // Reify may emit small helper ops at the insertion point. They dominate the
+  // new `tensor.empty` / `map_load`.
   Value consumerResult = consumerOp->getResult(0);
   Type elementType = getElementTypeOrSelf(consumerResult.getType());
   FailureOr<SmallVector<OpFoldResult>> newSizes =
@@ -1131,14 +1130,12 @@ static FailureOr<MapLoadOp> foldReshapeIntoMapLoad(RewriterBase &rewriter,
     return failure();
   }
   Location loc = reshapeOp->getLoc();
-  SmallVector<OpFoldResult> srcDims;
-  FailureOr<SmallVector<OpFoldResult>> resultDims;
-  {
-    OpBuilder::InsertionGuard g(rewriter);
-    rewriter.setInsertionPoint(reshapeOp);
-    srcDims = tensor::getMixedSizes(rewriter, loc, mapLoadOp.getOutput());
-    resultDims = reifyShapeOfResult(rewriter, reshapeOp, /*resultIndex=*/0);
-  }
+  OpBuilder::InsertionGuard g(rewriter);
+  rewriter.setInsertionPoint(reshapeOp);
+  SmallVector<OpFoldResult> srcDims =
+      tensor::getMixedSizes(rewriter, loc, mapLoadOp.getOutput());
+  FailureOr<SmallVector<OpFoldResult>> resultDims =
+      reifyShapeOfResult(rewriter, reshapeOp, /*resultIndex=*/0);
   if (failed(resultDims)) {
     return rewriter.notifyMatchFailure(
         reshapeOp,
@@ -1149,6 +1146,7 @@ static FailureOr<MapLoadOp> foldReshapeIntoMapLoad(RewriterBase &rewriter,
       rewriter, reshapeOp, mapLoadOp,
       [&rewriter, loc, resultDims = *resultDims,
        srcDims](ArrayRef<BlockArgument> indices) -> SmallVector<Value> {
+        OpBuilder::InsertionGuard g(rewriter);
         SmallVector<Value> indexValues(indices.begin(), indices.end());
         auto linearizeIndexOp = affine::AffineLinearizeIndexOp::create(
             rewriter, loc, indexValues, resultDims, /*disjoint=*/true);
